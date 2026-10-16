@@ -1,0 +1,1220 @@
+-- ===== 偷走一个巴掌 · 完整版（含碰撞箱）=====
+local WindUI = loadstring(game:HttpGet("https://raw.githubusercontent.com/KingScriptAE/No-sirve-nada./refs/heads/main/main.lua"))()
+local FLOW_SPEED = 5.5
+local BORDER_THICKNESS = 1.7
+local FIXED_FONT = Enum.Font.SourceSansBold
+
+-- ===== 边框流动主题：深蓝风格 =====
+local WhiteFlowTheme = ColorSequence.new({
+	ColorSequenceKeypoint.new(0.00, Color3.fromHex("0A1A3A")),
+	ColorSequenceKeypoint.new(0.25, Color3.fromHex("1E3A8A")),
+	ColorSequenceKeypoint.new(0.45, Color3.fromHex("2563EB")),
+	ColorSequenceKeypoint.new(0.55, Color3.fromHex("60A5FA")),
+	ColorSequenceKeypoint.new(0.75, Color3.fromHex("3B82F6")),
+	ColorSequenceKeypoint.new(1.00, Color3.fromHex("0A1A3A")),
+})
+local borderAnimation
+local borderInitialized = false
+
+function gradient(text, startColor, endColor)
+    local result = ""
+    local chars = {}
+    for uchar in text:gmatch("[%z\1-\127\194-\244][\128-\191]*") do
+        table.insert(chars, uchar)
+    end
+    local length = #chars
+    for i = 1, length do
+        local t = (i - 1) / math.max(length - 1, 1)
+        local r = startColor.R + (endColor.R - startColor.R) * t
+        local g = startColor.G + (endColor.G - startColor.G) * t
+        local b = startColor.B + (endColor.B - startColor.B) * t
+        result = result .. string.format('<font color="rgb(%d,%d,%d)">%s</font>', 
+            math.floor(r * 255), math.floor(g * 255), math.floor(b * 255), chars[i])
+    end
+    return result
+end
+
+local function StartFontEnforcer()
+    if not Window or not Window.UIElements then 
+        task.wait(1)
+        if not Window or not Window.UIElements then return end
+    end  
+    local MainFrame = Window.UIElements.Main
+    local function setFont(instance)
+        if instance:IsA("TextLabel") or instance:IsA("TextButton") or instance:IsA("TextBox") then
+            pcall(function() 
+                instance.Font = FIXED_FONT 
+                instance.RichText = true
+            end)
+        end
+    end
+    for _, child in ipairs(MainFrame:GetDescendants()) do
+        setFont(child)
+    end
+    MainFrame.DescendantAdded:Connect(function(child)
+        setFont(child)
+    end)
+end
+
+local function createBorder(window)
+    if not window or not window.UIElements then
+        task.wait(1)
+        if not window or not window.UIElements then return nil end
+    end
+    local mainFrame = window.UIElements.Main
+    if not mainFrame then return nil end    
+    if mainFrame:FindFirstChild("FlowBorder") then return mainFrame.FlowBorder end    
+    if not mainFrame:FindFirstChildOfClass("UICorner") then
+        local corner = Instance.new("UICorner")
+        corner.CornerRadius = UDim.new(0, 16)
+        corner.Parent = mainFrame
+    end    
+    local stroke = Instance.new("UIStroke")
+    stroke.Name = "FlowBorder"
+    stroke.Thickness = BORDER_THICKNESS
+    stroke.Color = Color3.new(1, 1, 1)
+    stroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+    stroke.LineJoinMode = Enum.LineJoinMode.Round
+    stroke.Enabled = true
+    stroke.Parent = mainFrame    
+    local gradient = Instance.new("UIGradient")
+    gradient.Name = "StreamEffect"
+    gradient.Color = WhiteFlowTheme
+    gradient.Rotation = 0
+    gradient.Parent = stroke    
+    return stroke
+end
+
+local function startBorderAnimation(window)
+    if not window or not window.UIElements then return nil end
+    local mainFrame = window.UIElements.Main
+    if not mainFrame then return nil end    
+    local stroke = mainFrame:FindFirstChild("FlowBorder")
+    if not stroke then return nil end    
+    local gradient = stroke:FindFirstChild("StreamEffect")
+    if not gradient then return nil end    
+    if borderAnimation then borderAnimation:Disconnect() borderAnimation = nil end    
+    local animation
+    animation = game:GetService("RunService").Heartbeat:Connect(function()
+        if not stroke or stroke.Parent == nil then
+            animation:Disconnect()
+            return
+        end
+        gradient.Rotation = (tick() * FLOW_SPEED * 20) % 360
+    end)
+    borderAnimation = animation
+    return animation
+end
+
+-- ========== 玩家信息 ==========
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local LocalPlayer = Players.LocalPlayer
+
+local function getRebirths()
+    local ls = LocalPlayer:FindFirstChild("leaderstats")
+    if ls then
+        for _, v in ipairs(ls:GetChildren()) do
+            local n = v.Name:lower()
+            if n:find("rebirth") or n:find("reset") or n:find("重生") then
+                return v.Value
+            end
+        end
+    end
+    local attr = LocalPlayer:GetAttribute("Rebirths") 
+        or LocalPlayer:GetAttribute("Rebirth") 
+        or LocalPlayer:GetAttribute("重生")
+    if attr then return attr end
+    return 0
+end
+
+local function findMyBase()
+    local plots = workspace:FindFirstChild("Plots")
+    if not plots then return nil end
+    local myName = LocalPlayer.Name
+    for _, plot in ipairs(plots:GetChildren()) do
+        if plot:IsA("Model") then
+            if plot.Name == myName or plot.Name:find(myName, 1, true) or plot.Name:lower() == myName:lower() then
+                return plot
+            end
+        end
+    end
+    return nil
+end
+
+-- ================================================
+-- ESP 设置
+-- ================================================
+local espEnabled = false
+local espTags = {}
+local priceFilter = 0
+local baseEspEnabled = false
+local baseTags = {}
+local playerEspEnabled = false
+local playerTags = {}
+
+-- ===== 数字格式化 =====
+local function formatPrice(price)
+    local n = tonumber(price) or 0
+    if n >= 1e8 then
+        return string.format("%.1f亿", n / 1e8)
+    elseif n >= 1e4 then
+        return string.format("%.1f万", n / 1e4)
+    else
+        return tostring(math.floor(n))
+    end
+end
+
+-- ===== 创建巴掌标签 =====
+local function createTag(glove)
+    if not espEnabled then return end
+    if espTags[glove] then return end
+
+    local price = tonumber(glove:GetAttribute("Price")) or 0
+    local weight = tonumber(glove:GetAttribute("Weight")) or 0
+
+    local color = Color3.fromRGB(220, 220, 220)
+    if price >= 10000000 then color = Color3.fromRGB(255, 50, 255)
+    elseif price >= 1000000 then color = Color3.fromRGB(255, 215, 0)
+    elseif price >= 100000 then color = Color3.fromRGB(255, 100, 100)
+    elseif price >= 10000 then color = Color3.fromRGB(255, 150, 50)
+    elseif price >= 1000 then color = Color3.fromRGB(100, 200, 255)
+    end
+
+    local billboard = Instance.new("BillboardGui")
+    billboard.Name = "SlapESP"
+    billboard.Size = UDim2.new(0, 180, 0, 50)
+    billboard.StudsOffset = Vector3.new(0, 3, 0)
+    billboard.AlwaysOnTop = true
+    billboard.MaxDistance = 1000
+    billboard.Parent = glove
+
+    local nameLabel = Instance.new("TextLabel")
+    nameLabel.Size = UDim2.new(1, 0, 0, 20)
+    nameLabel.Position = UDim2.new(0, 0, 0, 0)
+    nameLabel.BackgroundTransparency = 1
+    nameLabel.Text = glove.Name
+    nameLabel.TextColor3 = color
+    nameLabel.TextSize = 18
+    nameLabel.Font = Enum.Font.GothamBold
+    nameLabel.TextStrokeTransparency = 0.3
+    nameLabel.TextStrokeColor3 = Color3.fromRGB(0, 0, 0)
+    nameLabel.TextXAlignment = Enum.TextXAlignment.Center
+    nameLabel.Parent = billboard
+
+    local priceLabel = Instance.new("TextLabel")
+    priceLabel.Size = UDim2.new(1, 0, 0, 16)
+    priceLabel.Position = UDim2.new(0, 0, 0, 20)
+    priceLabel.BackgroundTransparency = 1
+    priceLabel.Text = "💰 " .. formatPrice(price)
+    priceLabel.TextColor3 = Color3.fromRGB(255, 220, 100)
+    priceLabel.TextSize = 14
+    priceLabel.Font = Enum.Font.GothamBold
+    priceLabel.TextStrokeTransparency = 0.3
+    priceLabel.TextStrokeColor3 = Color3.fromRGB(0, 0, 0)
+    priceLabel.TextXAlignment = Enum.TextXAlignment.Center
+    priceLabel.Parent = billboard
+
+    local weightLabel = Instance.new("TextLabel")
+    weightLabel.Size = UDim2.new(1, 0, 0, 14)
+    weightLabel.Position = UDim2.new(0, 0, 0, 36)
+    weightLabel.BackgroundTransparency = 1
+    weightLabel.Text = "⚖ " .. tostring(weight)
+    weightLabel.TextColor3 = Color3.fromRGB(200, 200, 255)
+    weightLabel.TextSize = 12
+    weightLabel.Font = Enum.Font.Gotham
+    weightLabel.TextStrokeTransparency = 0.3
+    weightLabel.TextStrokeColor3 = Color3.fromRGB(0, 0, 0)
+    weightLabel.TextXAlignment = Enum.TextXAlignment.Center
+    weightLabel.Parent = billboard
+
+    espTags[glove] = { billboard = billboard, nameLabel = nameLabel, priceLabel = priceLabel, weightLabel = weightLabel }
+end
+
+local function updateTag(glove)
+    local tag = espTags[glove]
+    if not tag then return end
+    local price = tonumber(glove:GetAttribute("Price")) or 0
+    local weight = tonumber(glove:GetAttribute("Weight")) or 0
+    local color = Color3.fromRGB(220, 220, 220)
+    if price >= 10000000 then color = Color3.fromRGB(255, 50, 255)
+    elseif price >= 1000000 then color = Color3.fromRGB(255, 215, 0)
+    elseif price >= 100000 then color = Color3.fromRGB(255, 100, 100)
+    elseif price >= 10000 then color = Color3.fromRGB(255, 150, 50)
+    elseif price >= 1000 then color = Color3.fromRGB(100, 200, 255)
+    end
+    tag.nameLabel.Text = glove.Name
+    tag.nameLabel.TextColor3 = color
+    tag.priceLabel.Text = "💰 " .. formatPrice(price)
+    tag.weightLabel.Text = "⚖ " .. tostring(weight)
+end
+
+local function removeTag(glove)
+    if espTags[glove] then
+        pcall(function() espTags[glove].billboard:Destroy() end)
+        espTags[glove] = nil
+    end
+end
+
+local function shouldShow(glove)
+    local price = tonumber(glove:GetAttribute("Price")) or 0
+    return price >= priceFilter
+end
+
+local function scanGloves()
+    if not espEnabled then return end
+
+    local found = {}
+    for _, obj in ipairs(workspace:GetDescendants()) do
+        if (obj:IsA("Model") or obj:IsA("BasePart")) and obj:GetAttribute("Price") then
+            if shouldShow(obj) then
+                found[obj] = true
+                if not espTags[obj] then createTag(obj) else updateTag(obj) end
+            end
+        end
+    end
+    for glove, _ in pairs(espTags) do
+        if not found[glove] or not glove.Parent then removeTag(glove) end
+    end
+end
+
+-- ===== 基地透视 =====
+local function formatTime(sec)
+    sec = tonumber(sec) or 0
+    if sec <= 0 then return "0秒" end
+    local h = math.floor(sec / 3600)
+    local m = math.floor((sec % 3600) / 60)
+    local s = math.floor(sec % 60)
+    if h > 0 then return string.format("%d时%d分%d秒", h, m, s)
+    elseif m > 0 then return string.format("%d分%d秒", m, s)
+    else return string.format("%d秒", s) end
+end
+
+local function createBaseTag(plot)
+    if baseTags[plot] then return end
+    local lockTimer = tonumber(plot:GetAttribute("LockTimer")) or 0
+    local cps = tonumber(plot:GetAttribute("CPS")) or 0
+    local owner = plot.Name
+    if owner == "Vacant" then return end
+    local attachPart = plot:FindFirstChild("BaseOverhead") or plot:FindFirstChild("PlotPoint") or plot:FindFirstChildWhichIsA("BasePart")
+    if not attachPart then return end
+
+    local billboard = Instance.new("BillboardGui")
+    billboard.Name = "BaseESP"
+    billboard.Size = UDim2.new(0, 220, 0, 60)
+    billboard.StudsOffset = Vector3.new(0, 8, 0)
+    billboard.AlwaysOnTop = true
+    billboard.MaxDistance = 5000
+    billboard.Parent = attachPart
+
+    local ownerLabel = Instance.new("TextLabel")
+    ownerLabel.Size = UDim2.new(1, 0, 0, 20)
+    ownerLabel.Position = UDim2.new(0, 0, 0, 0)
+    ownerLabel.BackgroundTransparency = 1
+    ownerLabel.Text = "🏠 " .. owner
+    ownerLabel.TextColor3 = Color3.fromRGB(100, 200, 255)
+    ownerLabel.TextSize = 16
+    ownerLabel.Font = Enum.Font.GothamBold
+    ownerLabel.TextStrokeTransparency = 0.3
+    ownerLabel.TextStrokeColor3 = Color3.fromRGB(0, 0, 0)
+    ownerLabel.Parent = billboard
+
+    local timeLabel = Instance.new("TextLabel")
+    timeLabel.Size = UDim2.new(1, 0, 0, 18)
+    timeLabel.Position = UDim2.new(0, 0, 0, 20)
+    timeLabel.BackgroundTransparency = 1
+    timeLabel.Text = "⏱ " .. formatTime(lockTimer)
+    timeLabel.TextColor3 = lockTimer > 0 and Color3.fromRGB(255, 100, 100) or Color3.fromRGB(100, 255, 100)
+    timeLabel.TextSize = 14
+    timeLabel.Font = Enum.Font.GothamBold
+    timeLabel.TextStrokeTransparency = 0.3
+    timeLabel.TextStrokeColor3 = Color3.fromRGB(0, 0, 0)
+    timeLabel.Parent = billboard
+
+    local cpsLabel = Instance.new("TextLabel")
+    cpsLabel.Size = UDim2.new(1, 0, 0, 16)
+    cpsLabel.Position = UDim2.new(0, 0, 0, 38)
+    cpsLabel.BackgroundTransparency = 1
+    cpsLabel.Text = "💰 " .. formatPrice(cps) .. "/秒"
+    cpsLabel.TextColor3 = Color3.fromRGB(255, 220, 100)
+    cpsLabel.TextSize = 13
+    cpsLabel.Font = Enum.Font.GothamBold
+    cpsLabel.TextStrokeTransparency = 0.3
+    cpsLabel.TextStrokeColor3 = Color3.fromRGB(0, 0, 0)
+    cpsLabel.Parent = billboard
+
+    baseTags[plot] = { billboard = billboard, ownerLabel = ownerLabel, timeLabel = timeLabel, cpsLabel = cpsLabel }
+end
+
+local function updateBaseTag(plot)
+    local tag = baseTags[plot]
+    if not tag then return end
+    local lockTimer = tonumber(plot:GetAttribute("LockTimer")) or 0
+    local cps = tonumber(plot:GetAttribute("CPS")) or 0
+    tag.ownerLabel.Text = "🏠 " .. plot.Name
+    tag.timeLabel.Text = "⏱ " .. formatTime(lockTimer)
+    tag.timeLabel.TextColor3 = lockTimer > 0 and Color3.fromRGB(255, 100, 100) or Color3.fromRGB(100, 255, 100)
+    tag.cpsLabel.Text = "💰 " .. formatPrice(cps) .. "/秒"
+end
+
+local function removeBaseTag(plot)
+    if baseTags[plot] then
+        pcall(function() baseTags[plot].billboard:Destroy() end)
+        baseTags[plot] = nil
+    end
+end
+
+local function scanBases()
+    if not baseEspEnabled then
+        for base, _ in pairs(baseTags) do removeBaseTag(base) end
+        return
+    end
+    local found = {}
+    local plots = workspace:FindFirstChild("Plots")
+    if plots then
+        for _, plot in pairs(plots:GetChildren()) do
+            if plot:IsA("Model") and plot.Name ~= "Vacant" then
+                found[plot] = true
+                if not baseTags[plot] then createBaseTag(plot) else updateBaseTag(plot) end
+            end
+        end
+    end
+    for base, _ in pairs(baseTags) do
+        if not found[base] or not base.Parent then removeBaseTag(base) end
+    end
+end
+
+-- ===== 玩家透视 =====
+local function getPlayerESPFrame()
+    local gui = game:GetService("CoreGui"):FindFirstChild("PlayerESP2D")
+    if not gui then
+        gui = Instance.new("ScreenGui")
+        gui.Name = "PlayerESP2D"
+        gui.ResetOnSpawn = false
+        gui.IgnoreGuiInset = true
+        gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+        pcall(function() gui.Parent = game:GetService("CoreGui") end)
+        if not gui.Parent then gui.Parent = LocalPlayer:WaitForChild("PlayerGui") end
+    end
+    return gui
+end
+
+local function createPlayerBox(plr)
+    if playerTags[plr] then return end
+    local char = plr.Character
+    if not char then return end
+    if not char:FindFirstChild("Head") or not char:FindFirstChild("HumanoidRootPart") then return end
+    local gui = getPlayerESPFrame()
+    local record = {}
+
+    local frame = Instance.new("Frame")
+    frame.Name = "PlayerBox_" .. plr.Name
+    frame.BackgroundTransparency = 1
+    frame.BorderSizePixel = 0
+    frame.Visible = false
+    frame.ZIndex = 5
+    frame.Parent = gui
+    record.frame = frame
+
+    local stroke = Instance.new("UIStroke")
+    stroke.Color = Color3.fromRGB(255, 80, 80)
+    stroke.Thickness = 2
+    stroke.Parent = frame
+    record.stroke = stroke
+
+    local nameLabel = Instance.new("TextLabel")
+    nameLabel.BackgroundTransparency = 1
+    nameLabel.Size = UDim2.new(1, 0, 0, 14)
+    nameLabel.Position = UDim2.new(0, 0, 0, -16)
+    nameLabel.Font = Enum.Font.GothamBold
+    nameLabel.TextSize = 12
+    nameLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+    nameLabel.TextStrokeTransparency = 0
+    nameLabel.TextStrokeColor3 = Color3.fromRGB(0, 0, 0)
+    nameLabel.Text = plr.Name
+    nameLabel.Visible = false
+    nameLabel.Parent = frame
+    record.nameLabel = nameLabel
+
+    local distLabel = Instance.new("TextLabel")
+    distLabel.BackgroundTransparency = 1
+    distLabel.Size = UDim2.new(1, 0, 0, 14)
+    distLabel.Position = UDim2.new(0, 0, 1, 2)
+    distLabel.Font = Enum.Font.GothamBold
+    distLabel.TextSize = 12
+    distLabel.TextColor3 = Color3.fromRGB(255, 255, 100)
+    distLabel.TextStrokeTransparency = 0
+    distLabel.TextStrokeColor3 = Color3.fromRGB(0, 0, 0)
+    distLabel.Text = "0m"
+    distLabel.Visible = false
+    distLabel.Parent = frame
+    record.distLabel = distLabel
+
+    playerTags[plr] = record
+end
+
+local function removePlayerBox(plr)
+    if playerTags[plr] then
+        pcall(function() playerTags[plr].frame:Destroy() end)
+        playerTags[plr] = nil
+    end
+end
+
+local function updatePlayerBoxes()
+    if not playerEspEnabled then return end
+    local camera = workspace.CurrentCamera
+    if not camera then return end
+    local myChar = LocalPlayer.Character
+    local myHRP = myChar and myChar:FindFirstChild("HumanoidRootPart")
+
+    for plr, rec in pairs(playerTags) do
+        local char = plr.Character
+        local head = char and char:FindFirstChild("Head")
+        local hrp = char and char:FindFirstChild("HumanoidRootPart")
+        if not head or not hrp then
+            rec.frame.Visible = false
+            rec.nameLabel.Visible = false
+            rec.distLabel.Visible = false
+        else
+            local headPos = head.Position + Vector3.new(0, 0.5, 0)
+            local footPos = hrp.Position - Vector3.new(0, 3, 0)
+            local headScreen, headOnScreen = camera:WorldToViewportPoint(headPos)
+            local footScreen, footOnScreen = camera:WorldToViewportPoint(footPos)
+
+            if headOnScreen and footOnScreen and headScreen.Z > 0 and footScreen.Z > 0 then
+                local x = headScreen.X
+                local y = headScreen.Y
+                local w = math.abs(headScreen.Y - footScreen.Y) * 0.6
+                local h = math.abs(headScreen.Y - footScreen.Y)
+                rec.frame.Position = UDim2.new(0, x - w/2, 0, y)
+                rec.frame.Size = UDim2.new(0, w, 0, h)
+                rec.frame.Visible = true
+                rec.nameLabel.Visible = true
+                rec.distLabel.Visible = true
+                if myHRP then
+                    local dist = (hrp.Position - myHRP.Position).Magnitude
+                    rec.distLabel.Text = string.format("%.0fm", dist)
+                end
+            else
+                rec.frame.Visible = false
+                rec.nameLabel.Visible = false
+                rec.distLabel.Visible = false
+            end
+        end
+    end
+end
+
+local function scanPlayers()
+    if not playerEspEnabled then
+        for plr, _ in pairs(playerTags) do removePlayerBox(plr) end
+        return
+    end
+    for _, plr in ipairs(Players:GetPlayers()) do
+        if plr ~= LocalPlayer and plr.Character then
+            if not playerTags[plr] then createPlayerBox(plr) end
+        end
+    end
+    for plr, _ in pairs(playerTags) do
+        if not plr.Parent or not plr.Character then removePlayerBox(plr) end
+    end
+end
+
+Players.PlayerAdded:Connect(function(plr)
+    plr.CharacterAdded:Connect(function()
+        if playerEspEnabled then
+            task.wait(0.5)
+            createPlayerBox(plr)
+        end
+    end)
+end)
+
+Players.PlayerRemoving:Connect(function(plr) removePlayerBox(plr) end)
+
+local function clearAllPlayerBoxes()
+    for plr, _ in pairs(playerTags) do removePlayerBox(plr) end
+    local gui = game:GetService("CoreGui"):FindFirstChild("PlayerESP2D")
+    if gui then gui:Destroy() end
+end
+
+-- ===== 传送辅助 =====
+local function teleportTo(position)
+    local char = LocalPlayer.Character
+    if not char then return end
+    local hrp = char:FindFirstChild("HumanoidRootPart")
+    if not hrp then return end
+    hrp.CFrame = CFrame.new(position)
+    hrp.Velocity = Vector3.new(0, 0, 0)
+    hrp.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+end
+
+local function teleportToMyBase()
+    local myBase = findMyBase()
+    if not myBase then return false, "找不到你的基地" end
+    local targetPart = myBase:FindFirstChild("PlotPoint") or myBase:FindFirstChild("SpawnPoint") or myBase:FindFirstChild("Spawn") or myBase:FindFirstChildWhichIsA("BasePart")
+    if not targetPart then
+        local ok, cframe = pcall(function() return myBase:GetPivot() end)
+        if ok and cframe then
+            teleportTo(cframe.Position + Vector3.new(0, 5, 0))
+            return true
+        end
+        return false, "找不到基地位置"
+    end
+    teleportTo(targetPart.Position + Vector3.new(0, 5, 0))
+    return true
+end
+
+local function teleportToMyBaseRoof()
+    local myBase = findMyBase()
+    if not myBase then return false, "找不到你的基地" end
+    local highestPart = nil
+    local highestY = -math.huge
+    for _, obj in ipairs(myBase:GetDescendants()) do
+        if obj:IsA("BasePart") and obj.CanCollide then
+            if obj.Position.Y > highestY then
+                highestY = obj.Position.Y
+                highestPart = obj
+            end
+        end
+    end
+    if not highestPart then return false, "找不到房顶" end
+    teleportTo(highestPart.Position + Vector3.new(0, 8, 0))
+    return true
+end
+
+-- ===== 玩家功能 =====
+local infiniteJumpEnabled = false
+local customWalkSpeed = 50
+local customJumpPower = 50
+local useSpeed = false
+local useJumpPower = false
+
+UserInputService.JumpRequest:Connect(function()
+    if not infiniteJumpEnabled then return end
+    local char = LocalPlayer.Character
+    if not char then return end
+    local humanoid = char:FindFirstChildOfClass("Humanoid")
+    if humanoid then humanoid:ChangeState(Enum.HumanoidStateType.Jumping) end
+end)
+
+local function applySpeed()
+    local char = LocalPlayer.Character
+    if not char then return end
+    local humanoid = char:FindFirstChildOfClass("Humanoid")
+    if humanoid and useSpeed then humanoid.WalkSpeed = customWalkSpeed end
+end
+
+local function applyJumpPower()
+    local char = LocalPlayer.Character
+    if not char then return end
+    local humanoid = char:FindFirstChildOfClass("Humanoid")
+    if humanoid and useJumpPower then
+        humanoid.UseJumpPower = true
+        humanoid.JumpPower = customJumpPower
+    end
+end
+
+LocalPlayer.CharacterAdded:Connect(function(char)
+    task.wait(1)
+    applySpeed()
+    applyJumpPower()
+end)
+
+-- ===== 秒互动 =====
+local autoPromptEnabled = false
+local promptConns = {}
+
+local function bindPrompt(prompt)
+    if promptConns[prompt] then return end
+    local conn = prompt.PromptButtonHoldBegan:Connect(function()
+        if not autoPromptEnabled then return end
+        pcall(function()
+            fireproximityprompt(prompt)
+        end)
+    end)
+    promptConns[prompt] = conn
+end
+
+local function setupAllPrompts()
+    for _, obj in ipairs(workspace:GetDescendants()) do
+        if obj:IsA("ProximityPrompt") then
+            bindPrompt(obj)
+        end
+    end
+end
+
+workspace.DescendantAdded:Connect(function(obj)
+    if obj:IsA("ProximityPrompt") then
+        task.wait(0.1)
+        bindPrompt(obj)
+    end
+end)
+
+setupAllPrompts()
+
+-- ================================================
+-- ★★★ 碰撞箱修改 ★★★
+-- ================================================
+local hbAllEnabled = false
+local hbAllSize = 10
+local hbAllColor = Color3.fromRGB(0, 100, 255)
+local hbAllDepth = 0.5
+local hbAllVisual = false
+local hbAllConn = nil
+local hbAllOriginals = {}
+local hbAllHL = {}
+
+local function hbAllApplyOne(plr)
+    if plr == LocalPlayer then return end
+    local char = plr.Character
+    if not char then return end
+    local hrp = char:FindFirstChild("HumanoidRootPart")
+    if not hrp then return end
+    if not hbAllOriginals[hrp] then
+        hbAllOriginals[hrp] = {
+            Size = hrp.Size,
+            Transparency = hrp.Transparency,
+            Color = hrp.Color,
+            Material = hrp.Material,
+            CanCollide = hrp.CanCollide
+        }
+    end
+    hrp.Size = Vector3.new(hbAllSize, hbAllSize, hbAllSize)
+    hrp.Color = hbAllColor
+    hrp.Transparency = 1 - hbAllDepth
+    hrp.Material = Enum.Material.ForceField
+    hrp.CanCollide = false
+
+    local hl = hbAllHL[plr]
+    if hbAllVisual then
+        if not hl or not hl.Parent then
+            hl = Instance.new("Highlight")
+            hl.FillTransparency = 1
+            hl.OutlineColor = hbAllColor
+            hl.OutlineTransparency = 0
+            hl.Adornee = hrp
+            hl.Parent = hrp
+            hbAllHL[plr] = hl
+        else
+            hl.OutlineColor = hbAllColor
+            hl.Adornee = hrp
+        end
+    else
+        if hl then hl:Destroy() hbAllHL[plr] = nil end
+    end
+end
+
+local function hbAllApply()
+    for _, plr in ipairs(Players:GetPlayers()) do
+        if plr ~= LocalPlayer then
+            hbAllApplyOne(plr)
+        end
+    end
+end
+
+local function hbAllRestore()
+    for hrp, d in pairs(hbAllOriginals) do
+        pcall(function()
+            if hrp and hrp.Parent then
+                hrp.Size = d.Size
+                hrp.Transparency = d.Transparency
+                hrp.Color = d.Color
+                hrp.Material = d.Material
+                hrp.CanCollide = d.CanCollide
+            end
+        end)
+    end
+    hbAllOriginals = {}
+    for _, hl in pairs(hbAllHL) do
+        pcall(function() hl:Destroy() end)
+    end
+    hbAllHL = {}
+end
+
+local function hbAllStartLoop()
+    if hbAllConn then hbAllConn:Disconnect() hbAllConn = nil end
+    if not hbAllEnabled then return end
+    hbAllConn = RunService.Heartbeat:Connect(function()
+        pcall(function()
+            if hbAllEnabled then hbAllApply() end
+        end)
+    end)
+end
+
+-- ========== 创建窗口 ==========
+Window = WindUI:CreateWindow({
+    Title = gradient("偷走一个巴掌", Color3.fromHex("#3B82F6"), Color3.fromHex("#60A5FA")), 
+    Author = gradient("作者:神之", Color3.fromHex("#2563EB"), Color3.fromHex("#93C5FD")),
+    IconThemed = true,
+    Folder = "Atomic",
+    Transparent = true,
+    Theme = "Dark",
+    SideBarWidth = 120,
+    HideSearchBar = false,
+    ScrollBarEnabled = true,
+    BackgroundImageTransparency = 0.55,
+    User = {
+        Enabled = true,
+        Anonymous = false,
+        Callback = function() end
+    },
+})
+
+Window:EditOpenButton({
+    Title = "[点击打开偷走一个巴掌]",
+    CornerRadius = UDim.new(0,2),
+    StrokeThickness = 0.5
+})
+
+Window:Tag({
+    Title = "免费版",
+    Radius = 5,
+    Color = Color3.fromHex("#2563EB"),
+})
+
+Window:SetToggleKey(Enum.KeyCode.F, true)
+
+if not borderInitialized then
+    task.spawn(function()
+        task.wait(0.5) 
+        local stroke = createBorder(Window)
+        if stroke then
+            startBorderAnimation(Window)
+            borderInitialized = true
+        end
+        StartFontEnforcer()
+    end)
+end
+
+local originalOpenFunction = Window.Open
+Window.Open = function(...)
+    local result = originalOpenFunction(...)
+    if borderInitialized and not borderAnimation then
+        task.wait(0.1)
+        startBorderAnimation(Window)
+    end
+    return result
+end
+
+Window:OnClose(function()
+    if borderAnimation then
+        borderAnimation:Disconnect()
+        borderAnimation = nil
+    end
+end)
+
+-- ===== 标签页 =====
+local Tabs = {
+    Info = Window:Tab({ Title = "信息", Icon = "info" }),
+    y = Window:Tab({ Title = "主要功能", Icon = "triangle" }),
+    tp = Window:Tab({ Title = "传送", Icon = "send" }),
+    plr = Window:Tab({ Title = "玩家", Icon = "user" }),
+    hb = Window:Tab({ Title = "碰撞箱", Icon = "box" }),
+    set = Window:Tab({ Title = "设置", Icon = "settings" }),
+}
+
+-- ========== 信息页 ==========
+Tabs.Info:Section({ Title = "被偷走一个巴掌" })
+
+local namePara = Tabs.Info:Paragraph({ Title = "玩家名字:", Desc = LocalPlayer.Name })
+local rebirthPara = Tabs.Info:Paragraph({ Title = "重生次数:", Desc = "0" })
+local playerCountPara = Tabs.Info:Paragraph({ Title = "服务器人数:", Desc = "0 / 0" })
+local cpsPara = Tabs.Info:Paragraph({ Title = "我的基地 CPS:", Desc = "$0/秒" })
+local lockPara = Tabs.Info:Paragraph({ Title = "我的基地锁定:", Desc = "未锁定" })
+local topSlapPara = Tabs.Info:Paragraph({ Title = "全场最高价:", Desc = "无" })
+local timePara = Tabs.Info:Paragraph({ Title = "当前时间:", Desc = "00:00:00" })
+local fpsPara = Tabs.Info:Paragraph({ Title = "FPS:", Desc = "60" })
+
+local frameCount = 0
+local lastFpsTime = tick()
+RunService.RenderStepped:Connect(function()
+    frameCount = frameCount + 1
+    local now = tick()
+    if now - lastFpsTime >= 1 then
+        pcall(function() fpsPara:SetDesc(tostring(frameCount)) end)
+        frameCount = 0
+        lastFpsTime = now
+    end
+end)
+
+task.spawn(function()
+    while true do
+        task.wait(1)
+        pcall(function()
+            namePara:SetDesc(LocalPlayer.Name)
+            rebirthPara:SetDesc(tostring(getRebirths()))
+            playerCountPara:SetDesc(#Players:GetPlayers() .. " / " .. Players.MaxPlayers)
+
+            local myBase = findMyBase()
+            local cps, lockTimer = 0, 0
+            if myBase then
+                cps = tonumber(myBase:GetAttribute("CPS")) or 0
+                lockTimer = tonumber(myBase:GetAttribute("LockTimer")) or 0
+            end
+            cpsPara:SetDesc("$" .. formatPrice(cps) .. "/秒")
+            if lockTimer > 0 then
+                lockPara:SetDesc("🔒 已锁定 " .. math.floor(lockTimer) .. " 秒")
+            else
+                lockPara:SetDesc("✅ 未锁定")
+            end
+
+            local highestPrice = 0
+            local highestName = "无"
+            local highestDist = 0
+            local myHRP = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+            for _, obj in ipairs(workspace:GetDescendants()) do
+                if (obj:IsA("Model") or obj:IsA("BasePart")) then
+                    local p = tonumber(obj:GetAttribute("Price"))
+                    if p and p > highestPrice then
+                        highestPrice = p
+                        highestName = obj.Name
+                        if myHRP then
+                            local ok, cf = pcall(function() return obj:GetPivot() end)
+                            if ok then
+                                highestDist = (cf.Position - myHRP.Position).Magnitude
+                            end
+                        end
+                    end
+                end
+            end
+            if highestPrice > 0 then
+                topSlapPara:SetDesc(highestName .. " ($" .. formatPrice(highestPrice) .. ") " .. math.floor(highestDist) .. "m")
+            else
+                topSlapPara:SetDesc("无")
+            end
+
+            timePara:SetDesc(os.date("%H:%M:%S"))
+        end)
+    end
+end)
+
+-- ========== 主要功能页 ==========
+Tabs.y:Section({ Title = "巴掌透视" })
+Tabs.y:Toggle({
+    Title = "ESP 显示巴掌名字",
+    Icon = "eye",
+    Default = false,
+    Callback = function(v)
+        espEnabled = v
+        if not v then
+            for glove, _ in pairs(espTags) do removeTag(glove) end
+        end
+    end,
+})
+
+Tabs.y:Input({
+    Title = "最低价格过滤",
+    Value = "0",
+    Placeholder = "0 = 显示全部",
+    Callback = function(v)
+        local num = tonumber(v)
+        if num then
+            priceFilter = num
+            for glove, _ in pairs(espTags) do removeTag(glove) end
+            scanGloves()
+        end
+    end,
+})
+
+Tabs.y:Section({ Title = "基地透视" })
+Tabs.y:Toggle({
+    Title = "显示基地解锁时间",
+    Icon = "lock",
+    Default = false,
+    Callback = function(v)
+        baseEspEnabled = v
+        if not v then
+            for base, _ in pairs(baseTags) do removeBaseTag(base) end
+        end
+    end,
+})
+
+Tabs.y:Section({ Title = "玩家透视" })
+Tabs.y:Toggle({
+    Title = "2D 方框 + 名字 + 距离",
+    Icon = "user",
+    Default = false,
+    Callback = function(v)
+        playerEspEnabled = v
+        if not v then clearAllPlayerBoxes() else scanPlayers() end
+    end,
+})
+
+Tabs.y:Section({ Title = "踏空" })
+Tabs.y:Button({
+    Title = "开启踏空",
+    Icon = "arrow-up",
+    Callback = function()
+        local ok, err = pcall(function()
+            loadstring(game:HttpGet("https://raw.githubusercontent.com/luauser729/roblox-scrip/main/%E8%B8%8F%E7%A9%BA"))()
+        end)
+        if ok then
+            print("[踏空] 加载成功")
+        else
+            warn("[踏空] 加载失败: " .. tostring(err))
+        end
+    end,
+})
+
+Tabs.y:Section({ Title = "互动功能" })
+Tabs.y:Toggle({
+    Title = "秒互动（你自己点哪个就秒完成哪个）",
+    Icon = "zap",
+    Default = false,
+    Callback = function(v)
+        autoPromptEnabled = v
+        print(v and "[秒互动] 已开启" or "[秒互动] 已关闭")
+    end,
+})
+
+Tabs.y:Paragraph({
+    Title = "说明:",
+    Desc = "开启后，你在游戏里长按任何互动按钮（比如装备、卖），会立即完成。",
+})
+
+-- ========== 传送页 ==========
+Tabs.tp:Section({ Title = "基地传送" })
+Tabs.tp:Paragraph({ Title = "说明:", Desc = "点击下方按钮传送到你的基地" })
+Tabs.tp:Button({
+    Title = "传送到我的基地",
+    Icon = "home",
+    Callback = function()
+        local ok, msg = teleportToMyBase()
+        if not ok then warn("[传送] " .. (msg or "失败")) end
+    end,
+})
+Tabs.tp:Button({
+    Title = "传送到我的基地房顶",
+    Icon = "arrow-up",
+    Callback = function()
+        local ok, msg = teleportToMyBaseRoof()
+        if not ok then warn("[传送] " .. (msg or "失败")) end
+    end,
+})
+Tabs.tp:Divider()
+Tabs.tp:Paragraph({ Title = "提示:", Desc = "如果传送失败，说明游戏中没有找到名字匹配你用户名的基地" })
+
+-- ========== 玩家页 ==========
+local inputSpeedValue = "50"
+local inputJumpValue = "50"
+
+Tabs.plr:Section({ Title = "移动功能" })
+
+Tabs.plr:Toggle({
+    Title = "无限跳跃",
+    Icon = "arrow-up",
+    Default = false,
+    Callback = function(v)
+        infiniteJumpEnabled = v
+    end,
+})
+
+Tabs.plr:Section({ Title = "移速设置（输入数字后点按钮）" })
+
+Tabs.plr:Input({
+    Title = "移速数值",
+    Value = "50",
+    Placeholder = "输入移速（如 50）",
+    Callback = function(input)
+        inputSpeedValue = input
+    end,
+})
+
+Tabs.plr:Button({
+    Title = "✅ 应用移速",
+    Callback = function()
+        local num = tonumber(inputSpeedValue)
+        if num and num > 0 then
+            customWalkSpeed = num
+            useSpeed = true
+            applySpeed()
+            print("[移速] 已应用: " .. num)
+        else
+            warn("[移速] 数值无效: " .. tostring(inputSpeedValue))
+        end
+    end,
+})
+
+Tabs.plr:Button({
+    Title = "❌ 关闭移速",
+    Callback = function()
+        useSpeed = false
+        local char = LocalPlayer.Character
+        if char then
+            local humanoid = char:FindFirstChildOfClass("Humanoid")
+            if humanoid then humanoid.WalkSpeed = 16 end
+        end
+        print("[移速] 已关闭")
+    end,
+})
+
+Tabs.plr:Section({ Title = "跳跃高度设置（输入数字后点按钮）" })
+
+Tabs.plr:Input({
+    Title = "跳跃数值",
+    Value = "50",
+    Placeholder = "输入跳跃高度（如 100）",
+    Callback = function(input)
+        inputJumpValue = input
+    end,
+})
+
+Tabs.plr:Button({
+    Title = "✅ 应用跳跃高度",
+    Callback = function()
+        local num = tonumber(inputJumpValue)
+        if num and num > 0 then
+            customJumpPower = num
+            useJumpPower = true
+            applyJumpPower()
+            print("[跳跃] 已应用: " .. num)
+        else
+            warn("[跳跃] 数值无效: " .. tostring(inputJumpValue))
+        end
+    end,
+})
+
+Tabs.plr:Button({
+    Title = "❌ 关闭跳跃高度",
+    Callback = function()
+        useJumpPower = false
+        local char = LocalPlayer.Character
+        if char then
+            local humanoid = char:FindFirstChildOfClass("Humanoid")
+            if humanoid then humanoid.JumpPower = 50 end
+        end
+        print("[跳跃] 已关闭")
+    end,
+})
+
+-- ========== 碰撞箱页 ==========
+Tabs.hb:Section({ Title = "碰撞箱修改（所有玩家）" })
+
+Tabs.hb:Toggle({
+    Title = "开启碰撞箱扩大（所有玩家）",
+    Icon = "box",
+    Default = false,
+    Callback = function(v)
+        hbAllEnabled = v
+        if v then
+            hbAllApply()
+            hbAllStartLoop()
+        else
+            if hbAllConn then hbAllConn:Disconnect() hbAllConn = nil end
+            hbAllRestore()
+        end
+    end,
+})
+
+Tabs.hb:Input({
+    Title = "碰撞箱倍数（1-200）",
+    Value = "10",
+    Placeholder = "输入倍数，例如 10",
+    Callback = function(input)
+        local num = tonumber(input)
+        if num then
+            hbAllSize = math.clamp(math.floor(num), 1, 200)
+            if hbAllEnabled then hbAllApply() end
+        end
+    end,
+})
+
+Tabs.hb:Input({
+    Title = "颜色深度（0-100）",
+    Value = "50",
+    Placeholder = "输入 0-100",
+    Callback = function(input)
+        local num = tonumber(input)
+        if num then
+            hbAllDepth = math.clamp(num / 100, 0, 1)
+            if hbAllEnabled then hbAllApply() end
+        end
+    end,
+})
+
+Tabs.hb:Toggle({
+    Title = "显示线框（所有玩家）",
+    Default = false,
+    Callback = function(v)
+        hbAllVisual = v
+        if hbAllEnabled then hbAllApply() end
+    end,
+})
+
+Tabs.hb:Input({
+    Title = "颜色（输入颜色名）",
+    Value = "blue",
+    Placeholder = "blue / red / green / yellow / purple / cyan / white / orange",
+    Callback = function(input)
+        local c = string.lower(tostring(input))
+        if c == "blue" then hbAllColor = Color3.fromRGB(0, 100, 255)
+        elseif c == "red" then hbAllColor = Color3.fromRGB(255, 0, 0)
+        elseif c == "green" then hbAllColor = Color3.fromRGB(0, 255, 0)
+        elseif c == "yellow" then hbAllColor = Color3.fromRGB(255, 255, 0)
+        elseif c == "purple" then hbAllColor = Color3.fromRGB(255, 0, 255)
+        elseif c == "cyan" then hbAllColor = Color3.fromRGB(0, 255, 255)
+        elseif c == "white" then hbAllColor = Color3.fromRGB(255, 255, 255)
+        elseif c == "orange" then hbAllColor = Color3.fromRGB(255, 128, 0)
+        end
+        if hbAllEnabled then hbAllApply() end
+    end,
+})
+
+Tabs.hb:Button({
+    Title = "重置碰撞箱",
+    Callback = function()
+        hbAllEnabled = false
+        hbAllSize = 10
+        hbAllDepth = 0.5
+        if hbAllConn then hbAllConn:Disconnect() hbAllConn = nil end
+        hbAllRestore()
+    end,
+})
+
+-- ========== 设置页 ==========
+Tabs.set:Section({ Title = "关于" })
+
+Tabs.set:Paragraph({
+    Title = "支持此作者",
+    Desc = "感谢使用本脚本，请多多支持作者！",
+})
+
+Tabs.set:Paragraph({
+    Title = "有问题？",
+    Desc = "有什么不好的地方，或者有什么建议，请加 QQ 群反馈。",
+})
+
+Tabs.set:Paragraph({
+    Title = "QQ 群号",
+    Desc = "1126544677",
+})
+
+Tabs.set:Divider()
+
+Tabs.set:Paragraph({
+    Title = "版本信息",
+    Desc = "偷走一个巴掌 v1.0\n作者：神之\nWindUI 主题：深蓝风格",
+})
+
+Tabs.set:Divider()
+
+Tabs.set:Paragraph({
+    Title = "免责声明",
+    Desc = "本脚本仅供学习交流使用，使用脚本产生的任何后果由使用者自行承担。",
+})
+
+-- ===== 主循环 =====
+task.spawn(function()
+    while true do
+        task.wait(1)
+        if espEnabled then pcall(scanGloves) end
+        pcall(scanBases)
+        if playerEspEnabled then pcall(scanPlayers) end
+    end
+end)
+
+RunService.RenderStepped:Connect(function()
+    if playerEspEnabled then pcall(updatePlayerBoxes) end
+end)
+
+Window:SelectTab(1)
